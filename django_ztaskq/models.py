@@ -1,14 +1,15 @@
 import datetime
-import time
 import sys
 import traceback
-import pickle
-import json
-
+try:
+    from cStringIO import StringIO
+except ImportError:
+    from StringIO import StringIO
+from pytz import utc
 from picklefield import PickledObjectField
-from django.db.models import *
+from django.core.exceptions import ObjectDoesNotExist
+from django.db.models import Model, CharField, TextField, DateTimeField
 
-from .conf import settings, logger
 
 class Status(object):
     """Enum-style class of possible task statuses."""
@@ -16,6 +17,7 @@ class Status(object):
     RUNNING = u'R'
     COMPLETED = u'C'
     FAILED = u'F'
+
 
 # pretty forms for the admin interface
 STATUS_CHOICES = (
@@ -25,73 +27,76 @@ STATUS_CHOICES = (
     (Status.FAILED, u'Failed'),
 )
 
-_func_cache = {} # could be a classwide "static" member (may have to override __new__)
+
+_func_cache = {} # could be a classwide "static" member
+                 # (may have to override __new__)
+
+
 class Task(Model):
+    """The queued task, persisted in the database
+    (so it can be polled for status)
+    """
+
     taskid = CharField(max_length=36, primary_key=True)
-    
+
     function_name = CharField(max_length=255)
     args = PickledObjectField()
     kwargs = PickledObjectField()
     return_value = PickledObjectField(null=True)
-    
+
     error = TextField(blank=True, null=True)
-    
+
     queued = DateTimeField(blank=True, null=True)
     started = DateTimeField(blank=True, null=True)
     finished = DateTimeField(blank=True, null=True)
-    
-    status = CharField(max_length=1, choices=STATUS_CHOICES, 
+
+    status = CharField(max_length=1, choices=STATUS_CHOICES,
         default=Status.QUEUED)
-    
-    def save(self, *args, **kwargs):
-        if not self.queued:
-            self.queued = datetime.datetime.utcnow()
-        super(Task, self).save(*args, **kwargs)
-    
+
     class Meta:
         db_table = 'django_ztaskq_task'
-    
+
     @classmethod
-    def run_task(cls, task_id):
+    def run_task(cls, task_id, logger):
         try:
             task = cls.objects.get(pk=task_id)
-        except Exception, e:
+        except ObjectDoesNotExist, e:
             logger.info('Could not get task with id %s:\n%s' % (task_id, e))
             return
-        task.run()
-    
+        task.run(logger)
+
     def mark_running(self):
         self.status = Status.RUNNING
-        self.started = datetime.datetime.utcnow()
-        
+        self.started = utc.localize(datetime.datetime.utcnow())
+
         self.save()
-    
+
     def mark_complete(self, success=True, delete=False, error_msg=''):
         """Mark the task as finished (success/failure)
-        
+
         The error message is only used if success is False.
-        
+
         """
         if delete:
             self.delete()
             return
-        
+
         self.status = Status.COMPLETED if success else Status.FAILED
         if not success:
             self.error = error_msg
-        self.finished = datetime.datetime.utcnow()
-        
+        self.finished = utc.localize(datetime.datetime.utcnow())
+
         self.save()
-    
-    def run(self):
-        
+
+    def run(self, logger):
+
         function_name = self.function_name
         args = self.args
         kwargs = self.kwargs
-        
+
         self.mark_running()
         logger.info('Executing task function (%s)' % function_name)
-        
+
         try:
             function = _func_cache[function_name]
         except KeyError:
@@ -102,19 +107,21 @@ class Task(Model):
                 __import__(module_name)
             function = getattr(sys.modules[module_name], member_name)
             _func_cache[function_name] = function
-        
+
         try:
-            logger.info('Task.run is calling %r(%r, %r)' % (function, args, kwargs))
+            logger.info('Task.run is calling %r(%r, %r)' % (
+                    function, args, kwargs))
             return_value = function(*args, **kwargs)
             logger.info('Successfully finished the function call.')
-        except Exception, e:
-            traceback = sys.last_traceback if hasattr(sys, 'last_traceback') else 'no traceback available'
-            self.mark_complete(success=False, error_msg=traceback)
-            logger.error('Error calling %s. Details:\n%s' % (function_name, traceback))
-            raise
+        except Exception: # pylint: disable=W0703
+            stream = StringIO()
+            traceback.print_exc(None, stream)
+            self.mark_complete(success=False, error_msg=stream.getvalue())
+            logger.error('Error calling %s. Details:\n%s' % (
+                    function_name, stream.getvalue()))
+            sys.exc_clear()
         else:
             self.return_value = return_value
             self.save()
             self.mark_complete(success=True)
             logger.info('Called %s successfully' % function_name)
-
