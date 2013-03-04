@@ -1,8 +1,8 @@
 #!/usr/bin/env python
 try:
-    from setuptools import setup
+    from setuptools import setup, find_packages
 except ImportError:
-    from distutils.core import setup
+    from distutils.core import setup, find_packages
 import django_ztaskq as distmeta
 
 setup(
@@ -11,12 +11,12 @@ setup(
     author=distmeta.__author__,
     author_email=distmeta.__contact__,
     url=distmeta.__homepage__,
-    #
+    #   
     name='django-ztaskq',
-    packages=['django_ztaskq'],
+    packages=find_packages(),
     install_requires=[
         'django-picklefield',
         'pyzmq',
         'pytz'
-    ]
+    ]   
 )
